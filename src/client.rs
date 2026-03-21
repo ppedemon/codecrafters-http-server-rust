@@ -1,48 +1,99 @@
-use std::io::ErrorKind::*;
-
-use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{self, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpStream;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
-#[derive(Error, Debug)]
-pub enum ClientError {
-    #[error("connection closed")]
-    Disconnected,
-    #[error(transparent)]
-    Io(#[from] std::io::Error)
+use crate::request::{Request, RequestError, Version};
+
+enum Status {
+    Ok,
+    NotFound,
+}
+
+impl Status {
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            Status::Ok => "200".as_bytes(),
+            Status::NotFound => "404".as_bytes(),
+        }
+    }
+
+    pub fn reason(&self) -> &[u8] {
+        match self {
+            Status::Ok => "OK".as_bytes(),
+            Status::NotFound => "Not Found".as_bytes(),
+        }
+    }
+}
+
+struct ResponseLine {
+    version: Version,
+    status: Status,
+}
+
+impl<'a> ResponseLine {
+    pub fn new(version: Version, status: Status) -> Self {
+        Self { version, status }
+    }
+
+    pub async fn write_to<R: AsyncWrite + Unpin>(&self, w: &mut BufWriter<R>) -> io::Result<()> {
+        w.write_all(self.version.as_bytes()).await?;
+        w.write_u8(b' ').await?;
+        w.write_all(self.status.as_bytes()).await?;
+        w.write_u8(b' ').await?;
+        w.write_all(self.status.reason()).await?;
+        w.write_all(b"\r\n").await?;
+        Ok(())
+    }
 }
 
 pub struct Client {
-    socket: TcpStream,
-    write_buf: Vec<u8>,
+    reader: BufReader<OwnedReadHalf>,
+    writer: BufWriter<OwnedWriteHalf>,
 }
 
 impl Client {
     pub fn new(socket: TcpStream) -> Self {
+        let (reader, writer) = socket.into_split();
         Self {
-            socket,
-            write_buf: Vec::with_capacity(1024),
+            reader: BufReader::new(reader),
+            writer: BufWriter::new(writer),
         }
     }
 
-    pub async fn run(&mut self) -> Result<(), ClientError> {
-        let _ = self.socket.read_i8().await.map_err(Self::map_err)?;
-        self.send_reponse(200).await?;
+    pub async fn run(&mut self) -> Result<(), RequestError> {
+        let request = Request::from(&mut self.reader).await?;
+        
+        let response_line = if request.request_line.target == "/" {
+            ResponseLine::new(Version::Http11, Status::Ok)
+        } else {
+            ResponseLine::new(Version::Http11, Status::NotFound)
+        };
+        
+        self.send_response(&response_line, vec![], None).await?;
         Ok(())
     }
 
-    pub async fn send_reponse(&mut self, status: u16) -> Result<(), ClientError> {
-        self.write_buf.clear();
-        self.write_buf.extend_from_slice(format!("HTTP/1.1 {} OK\r\n", status).as_bytes());
-        self.write_buf.extend_from_slice("\r\n".as_bytes());
-        self.socket.write_all(&self.write_buf).await.map_err(Self::map_err)?;
-        Ok(())
-    }
+    async fn send_response(
+        &mut self,
+        response_line: &ResponseLine,
+        headers: Vec<(&str, &str)>,
+        body: Option<Vec<u8>>,
+    ) -> io::Result<()> {
+        response_line.write_to(&mut self.writer).await?;
 
-    fn map_err(e: std::io::Error) -> ClientError {
-        match e.kind() {
-            UnexpectedEof | ConnectionReset | BrokenPipe => ClientError::Disconnected,
-            _ => ClientError::Io(e)
+        for (name, value) in headers {
+            self.writer.write_all(name.trim().as_bytes()).await?;
+            self.writer.write_all(b": ").await?;
+            self.writer.write_all(value.trim().as_bytes()).await?;
         }
+        self.writer.write_all(b"\r\n").await?;
+
+        match body {
+            None => {},
+            Some(bytes) => self.writer.write_all(&bytes).await?,
+        }
+
+        self.writer.flush().await?;
+        Ok(())
     }
 }
