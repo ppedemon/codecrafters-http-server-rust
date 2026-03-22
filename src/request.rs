@@ -6,6 +6,8 @@ use thiserror::Error;
 use tokio::io::AsyncRead;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+use crate::headers::Header;
+
 #[derive(Debug, Error)]
 pub enum RequestError {
     #[error("invalid http version")]
@@ -78,9 +80,9 @@ impl RequestLine {
     }
 }
 
-pub struct Headers(BTreeMap<String, Vec<String>>);
+pub struct Headers(BTreeMap<Header, Vec<String>>);
 
-impl<'a> Headers {
+impl Headers {
     pub async fn from<R: AsyncRead + Unpin>(r: &mut BufReader<R>) -> Result<Self, RequestError> {
         let mut headers = BTreeMap::new();
 
@@ -97,10 +99,10 @@ impl<'a> Headers {
                 break;
             }
 
-            let (header, value) = line.split_once(':').ok_or(RequestError::InvalidRequest)?;
-            let name = header.to_string().to_lowercase();
+            let (h, value) = line.split_once(':').ok_or(RequestError::InvalidRequest)?;
+            let header = Header::from(h).ok_or(RequestError::InvalidRequest)?;
             let value = value.trim().to_string();
-            headers.entry(name).or_insert(Vec::default()).push(value);
+            headers.entry(header).or_insert(Vec::default()).push(value);
         }
 
         Ok(Self(headers))

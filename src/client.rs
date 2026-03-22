@@ -2,6 +2,7 @@ use tokio::io::{self, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
+use crate::headers::Header;
 use crate::request::{Request, RequestError, Version};
 
 enum Status {
@@ -62,38 +63,62 @@ impl Client {
 
     pub async fn run(&mut self) -> Result<(), RequestError> {
         let request = Request::from(&mut self.reader).await?;
-        
-        let response_line = if request.request_line.target == "/" {
-            ResponseLine::new(Version::Http11, Status::Ok)
-        } else {
-            ResponseLine::new(Version::Http11, Status::NotFound)
-        };
-        
-        self.send_response(&response_line, vec![], None).await?;
+        self.serve(&request).await?;
         Ok(())
+    }
+
+    async fn serve(&mut self, request: &Request) -> io::Result<()> {
+        let target = request.request_line.target.as_str();
+        if target == "/" {
+            let response_line = ResponseLine::new(Version::Http11, Status::Ok);
+            self.send_response(&response_line, vec![], None).await
+        } else if target.starts_with("/echo/") {
+            let msg = &target[6..];
+            let response_line = ResponseLine::new(Version::Http11, Status::Ok);
+            self.send_response(
+                &response_line,
+                vec![(Header::ContentType, "text/plain")],
+                Some(msg.as_bytes()),
+            )
+            .await
+        } else {
+            let response_line = ResponseLine::new(Version::Http11, Status::NotFound);
+            self.send_response(&response_line, vec![], None).await
+        }
     }
 
     async fn send_response(
         &mut self,
         response_line: &ResponseLine,
-        headers: Vec<(&str, &str)>,
-        body: Option<Vec<u8>>,
+        headers: Vec<(Header, &str)>,
+        body: Option<&[u8]>,
     ) -> io::Result<()> {
         response_line.write_to(&mut self.writer).await?;
 
         for (name, value) in headers {
-            self.writer.write_all(name.trim().as_bytes()).await?;
-            self.writer.write_all(b": ").await?;
-            self.writer.write_all(value.trim().as_bytes()).await?;
+            self.write_header(name, value).await?;
         }
-        self.writer.write_all(b"\r\n").await?;
 
         match body {
-            None => {},
-            Some(bytes) => self.writer.write_all(&bytes).await?,
+            None => self.writer.write_all(b"\r\n").await?,
+            Some(bytes) => {
+                let mut buf = itoa::Buffer::new();
+                let len = buf.format(bytes.len());
+                self.write_header(Header::ContentLength, len).await?;
+                self.writer.write_all(b"\r\n").await?;
+                self.writer.write_all(&bytes).await?;
+            }
         }
 
         self.writer.flush().await?;
+        Ok(())
+    }
+
+    async fn write_header(&mut self, header: Header, value: &str) -> io::Result<()> {
+        self.writer.write_all(header.as_bytes()).await?;
+        self.writer.write_all(b": ").await?;
+        self.writer.write_all(value.trim().as_bytes()).await?;
+        self.writer.write_all(b"\r\n").await?;
         Ok(())
     }
 }

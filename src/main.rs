@@ -5,6 +5,7 @@ use crate::client::Client;
 use crate::request::RequestError;
 
 mod client;
+mod headers;
 mod request;
 
 #[tokio::main]
