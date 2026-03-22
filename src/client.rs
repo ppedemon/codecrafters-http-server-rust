@@ -1,8 +1,10 @@
+use std::sync::Arc;
 use tokio::io::{self, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
 use crate::error::ServerError;
+use crate::fileops;
 use crate::headers::Header;
 use crate::request::{Request, Version};
 
@@ -49,14 +51,16 @@ impl<'a> ResponseLine {
 }
 
 pub struct Client {
+    root_dir: Arc<Option<String>>,
     reader: BufReader<OwnedReadHalf>,
     writer: BufWriter<OwnedWriteHalf>,
 }
 
 impl Client {
-    pub fn new(socket: TcpStream) -> Self {
+    pub fn new(socket: TcpStream, root_dir: Arc<Option<String>>) -> Self {
         let (reader, writer) = socket.into_split();
         Self {
+            root_dir,
             reader: BufReader::new(reader),
             writer: BufWriter::new(writer),
         }
@@ -72,43 +76,61 @@ impl Client {
         let target = request.request_line.target.as_str();
         if target == "/" {
             let response_line = ResponseLine::new(Version::Http11, Status::Ok);
-            self.send_response(&response_line, vec![], None).await
+            self.send_response(&response_line, &[], None).await
         } else if target.starts_with("/echo/") {
             let msg = &target[6..];
             let response_line = ResponseLine::new(Version::Http11, Status::Ok);
             self.send_response(
                 &response_line,
-                vec![(Header::ContentType, "text/plain")],
+                &[(Header::ContentType, "text/plain")],
                 Some(msg.as_bytes()),
             )
             .await
         } else if target == "/user-agent" {
             let user_agent = request
-                .headers
-                .0
-                .get(&Header::UserAgent)
+                .get_header(&Header::UserAgent)
+                .and_then(|v| match v.as_slice() {
+                    [user_agent] => Some(user_agent.as_bytes()),
+                    _ => None,
+                })
                 .ok_or(ServerError::InvalidRequest)?;
-            if user_agent.len() != 1 {
-                Err(ServerError::InvalidRequest)
-            } else {
-                let response_line = ResponseLine::new(Version::Http11, Status::Ok);
-                self.send_response(
-                    &response_line,
-                    vec![(Header::ContentType, "text/plain")],
-                    Some(user_agent[0].as_bytes()),
-                )
-                .await
+            let response_line = ResponseLine::new(Version::Http11, Status::Ok);
+            self.send_response(
+                &response_line,
+                &[(Header::ContentType, "text/plain")],
+                Some(user_agent),
+            )
+            .await
+        } else if target.starts_with("/files/") {
+            let file_name = &target[7..];
+            let Some(root_dir) = &*self.root_dir else {
+                return Err(ServerError::NoRootFolder);
+            };
+            match fileops::read_file(&root_dir, file_name).await {
+                Ok(buf) => {
+                    let response_line = ResponseLine::new(Version::Http11, Status::Ok);
+                    self.send_response(
+                        &response_line,
+                        &[(Header::ContentType, "application/octet-stream")],
+                        Some(&buf),
+                    )
+                    .await
+                }
+                Err(_) => {
+                    let response_line = ResponseLine::new(Version::Http11, Status::NotFound);
+                    self.send_response(&response_line, &[], None).await
+                }
             }
         } else {
             let response_line = ResponseLine::new(Version::Http11, Status::NotFound);
-            self.send_response(&response_line, vec![], None).await
+            self.send_response(&response_line, &[], None).await
         }
     }
 
     async fn send_response(
         &mut self,
         response_line: &ResponseLine,
-        headers: Vec<(Header, &str)>,
+        headers: &[(Header, &str)],
         body: Option<&[u8]>,
     ) -> Result<(), ServerError> {
         response_line.write_to(&mut self.writer).await?;
@@ -122,7 +144,7 @@ impl Client {
             Some(bytes) => {
                 let mut buf = itoa::Buffer::new();
                 let len = buf.format(bytes.len());
-                self.write_header(Header::ContentLength, len).await?;
+                self.write_header(&Header::ContentLength, len).await?;
                 self.writer.write_all(b"\r\n").await?;
                 self.writer.write_all(&bytes).await?;
             }
@@ -132,7 +154,7 @@ impl Client {
         Ok(())
     }
 
-    async fn write_header(&mut self, header: Header, value: &str) -> io::Result<()> {
+    async fn write_header(&mut self, header: &Header, value: &str) -> io::Result<()> {
         self.writer.write_all(header.as_bytes()).await?;
         self.writer.write_all(b": ").await?;
         self.writer.write_all(value.trim().as_bytes()).await?;

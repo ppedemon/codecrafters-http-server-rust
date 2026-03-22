@@ -118,4 +118,8 @@ impl Request {
             body: None,
         })
     }
+
+    pub fn get_header(&self, h: &Header) -> Option<&Vec<String>> {
+      self.headers.0.get(h)
+    }
 }

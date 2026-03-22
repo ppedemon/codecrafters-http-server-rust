@@ -11,6 +11,8 @@ pub enum ServerError {
     InvalidRequest,
     #[error("connection closed")]
     Disconnected,
+    #[error("no root folder")]
+    NoRootFolder,
     #[error(transparent)]
     Io(std::io::Error),
 }
