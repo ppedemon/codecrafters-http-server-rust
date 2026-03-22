@@ -1,26 +1,11 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
-use std::io::ErrorKind::{BrokenPipe, ConnectionReset, UnexpectedEof};
-use thiserror::Error;
 use tokio::io::AsyncRead;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+use crate::error::ServerError;
 use crate::headers::Header;
-
-#[derive(Debug, Error)]
-pub enum RequestError {
-    #[error("invalid http version")]
-    InvalidVersion,
-    #[error("invalid method")]
-    InvalidMethod,
-    #[error("invalid request")]
-    InvalidRequest,
-    #[error("connection closed")]
-    Disconnected,
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-}
 
 pub enum Method {
     Get,
@@ -28,11 +13,11 @@ pub enum Method {
 }
 
 impl Method {
-    pub fn from(s: &str) -> Result<Method, RequestError> {
+    pub fn from(s: &str) -> Result<Method, ServerError> {
         match s.trim() {
             "GET" => Ok(Method::Get),
             "POST" => Ok(Method::Post),
-            _ => Err(RequestError::InvalidMethod),
+            _ => Err(ServerError::InvalidMethod),
         }
     }
 }
@@ -42,10 +27,10 @@ pub enum Version {
 }
 
 impl Version {
-    pub fn from(s: &str) -> Result<Version, RequestError> {
+    pub fn from(s: &str) -> Result<Version, ServerError> {
         match s.trim() {
             "HTTP/1.1" => Ok(Version::Http11),
-            _ => Err(RequestError::InvalidVersion),
+            _ => Err(ServerError::InvalidVersion),
         }
     }
 
@@ -63,13 +48,13 @@ pub struct RequestLine {
 }
 
 impl RequestLine {
-    pub fn from(s: &str) -> Result<Self, RequestError> {
+    pub fn from(s: &str) -> Result<Self, ServerError> {
         let mut tokens = s.split_ascii_whitespace();
-        let method = Method::from(tokens.next().ok_or(RequestError::InvalidRequest)?)?;
-        let target = tokens.next().ok_or(RequestError::InvalidRequest)?;
-        let version = Version::from(tokens.next().ok_or(RequestError::InvalidRequest)?)?;
+        let method = Method::from(tokens.next().ok_or(ServerError::InvalidRequest)?)?;
+        let target = tokens.next().ok_or(ServerError::InvalidRequest)?;
+        let version = Version::from(tokens.next().ok_or(ServerError::InvalidRequest)?)?;
         if tokens.next().is_some() {
-            Err(RequestError::InvalidRequest)
+            Err(ServerError::InvalidRequest)
         } else {
             Ok(Self {
                 method,
@@ -80,18 +65,18 @@ impl RequestLine {
     }
 }
 
-pub struct Headers(BTreeMap<Header, Vec<String>>);
+pub struct Headers(pub BTreeMap<Header, Vec<String>>);
 
 impl Headers {
-    pub async fn from<R: AsyncRead + Unpin>(r: &mut BufReader<R>) -> Result<Self, RequestError> {
+    pub async fn from<R: AsyncRead + Unpin>(r: &mut BufReader<R>) -> Result<Self, ServerError> {
         let mut headers = BTreeMap::new();
 
         let mut buf = String::with_capacity(512);
         loop {
             buf.clear();
-            let n = r.read_line(&mut buf).await.map_err(to_request_error)?;
+            let n = r.read_line(&mut buf).await?;
             if n == 0 {
-                return Err(RequestError::Disconnected);
+                return Err(ServerError::Disconnected);
             }
 
             let line = buf.trim_end_matches("\r\n");
@@ -99,8 +84,8 @@ impl Headers {
                 break;
             }
 
-            let (h, value) = line.split_once(':').ok_or(RequestError::InvalidRequest)?;
-            let header = Header::from(h).ok_or(RequestError::InvalidRequest)?;
+            let (h, value) = line.split_once(':').ok_or(ServerError::InvalidRequest)?;
+            let header = Header::from(h).ok_or(ServerError::InvalidRequest)?;
             let value = value.trim().to_string();
             headers.entry(header).or_insert(Vec::default()).push(value);
         }
@@ -111,17 +96,17 @@ impl Headers {
 
 pub struct Request {
     pub request_line: RequestLine,
-    headers: Headers,
+    pub headers: Headers,
     body: Option<Vec<u8>>,
 }
 
 impl Request {
-    pub async fn from<R: AsyncRead + Unpin>(r: &mut BufReader<R>) -> Result<Self, RequestError> {
+    pub async fn from<R: AsyncRead + Unpin>(r: &mut BufReader<R>) -> Result<Self, ServerError> {
         let mut buf = String::with_capacity(512);
 
-        let n = r.read_line(&mut buf).await.map_err(to_request_error)?;
+        let n = r.read_line(&mut buf).await?;
         if n == 0 {
-            return Err(RequestError::Disconnected);
+            return Err(ServerError::Disconnected);
         }
         let request_line = RequestLine::from(buf.trim_end_matches("\r\n"))?;
         let headers = Headers::from(r).await?;
@@ -132,12 +117,5 @@ impl Request {
             headers,
             body: None,
         })
-    }
-}
-
-fn to_request_error(e: std::io::Error) -> RequestError {
-    match e.kind() {
-        UnexpectedEof | ConnectionReset | BrokenPipe => RequestError::Disconnected,
-        _ => RequestError::Io(e),
     }
 }

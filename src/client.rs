@@ -2,8 +2,9 @@ use tokio::io::{self, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
+use crate::error::ServerError;
 use crate::headers::Header;
-use crate::request::{Request, RequestError, Version};
+use crate::request::{Request, Version};
 
 enum Status {
     Ok,
@@ -61,13 +62,13 @@ impl Client {
         }
     }
 
-    pub async fn run(&mut self) -> Result<(), RequestError> {
+    pub async fn run(&mut self) -> Result<(), ServerError> {
         let request = Request::from(&mut self.reader).await?;
         self.serve(&request).await?;
         Ok(())
     }
 
-    async fn serve(&mut self, request: &Request) -> io::Result<()> {
+    async fn serve(&mut self, request: &Request) -> Result<(), ServerError> {
         let target = request.request_line.target.as_str();
         if target == "/" {
             let response_line = ResponseLine::new(Version::Http11, Status::Ok);
@@ -81,6 +82,23 @@ impl Client {
                 Some(msg.as_bytes()),
             )
             .await
+        } else if target == "/user-agent" {
+            let user_agent = request
+                .headers
+                .0
+                .get(&Header::UserAgent)
+                .ok_or(ServerError::InvalidRequest)?;
+            if user_agent.len() != 1 {
+                Err(ServerError::InvalidRequest)
+            } else {
+                let response_line = ResponseLine::new(Version::Http11, Status::Ok);
+                self.send_response(
+                    &response_line,
+                    vec![(Header::ContentType, "text/plain")],
+                    Some(user_agent[0].as_bytes()),
+                )
+                .await
+            }
         } else {
             let response_line = ResponseLine::new(Version::Http11, Status::NotFound);
             self.send_response(&response_line, vec![], None).await
@@ -92,7 +110,7 @@ impl Client {
         response_line: &ResponseLine,
         headers: Vec<(Header, &str)>,
         body: Option<&[u8]>,
-    ) -> io::Result<()> {
+    ) -> Result<(), ServerError> {
         response_line.write_to(&mut self.writer).await?;
 
         for (name, value) in headers {

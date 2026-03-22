@@ -1,10 +1,10 @@
 use anyhow::Result;
 use tokio::net::TcpListener;
 
-use crate::client::Client;
-use crate::request::RequestError;
+use crate::{client::Client, error::ServerError};
 
 mod client;
+mod error;
 mod headers;
 mod request;
 
@@ -17,7 +17,7 @@ async fn main() -> Result<()> {
             let mut client = Client::new(socket);
             if let Err(e) = client.run().await {
                 match e {
-                    RequestError::Disconnected => {}
+                    ServerError::Disconnected => {}
                     _ => println!("client error: {}", e),
                 }
             }
