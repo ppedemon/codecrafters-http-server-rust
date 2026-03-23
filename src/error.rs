@@ -13,6 +13,8 @@ pub enum ServerError {
     Disconnected,
     #[error("no root folder")]
     NoRootFolder,
+    #[error("compress error")]
+    CompressError,
     #[error(transparent)]
     Io(std::io::Error),
 }

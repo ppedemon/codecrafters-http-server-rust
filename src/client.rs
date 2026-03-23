@@ -13,6 +13,7 @@ enum Status {
     Ok,
     Created,
     NotFound,
+    InternalServerError,
 }
 
 impl Status {
@@ -21,6 +22,7 @@ impl Status {
             Self::Ok => b"200",
             Self::Created => b"201",
             Self::NotFound => b"404",
+            Self::InternalServerError => b"500",
         }
     }
 
@@ -29,6 +31,7 @@ impl Status {
             Self::Ok => b"OK",
             Self::Created => b"Created",
             Self::NotFound => b"Not Found",
+            Self::InternalServerError => b"Internal Server Error",
         }
     }
 }
@@ -75,8 +78,10 @@ impl Client {
 
     pub async fn run(&mut self) -> Result<(), ServerError> {
         let request = Request::from(&mut self.reader).await?;
-        self.serve(&request).await?;
-        Ok(())
+        match self.serve(&request).await {
+            Ok(_) | Err(ServerError::Disconnected) => Ok(()),
+            _ => self.server_error().await,
+        }
     }
 
     async fn serve(&mut self, request: &Request) -> Result<(), ServerError> {
@@ -162,7 +167,8 @@ impl Client {
         ext_headers.extend_from_slice(headers);
         ext_headers.push((Header::ContentEncoding, encoding.as_str()));
         let response_line = ResponseLine::new(Version::Http11, Status::Ok);
-        self.send_response(&response_line, &ext_headers, Some(body))
+        let enc_body = encoding.encode(body).await?;
+        self.send_response(&response_line, &ext_headers, Some(&enc_body))
             .await
     }
 
@@ -173,6 +179,11 @@ impl Client {
 
     async fn not_found(&mut self) -> Result<(), ServerError> {
         let response_line = ResponseLine::new(Version::Http11, Status::NotFound);
+        self.send_response(&response_line, &[], None).await
+    }
+
+    async fn server_error(&mut self) -> Result<(), ServerError> {
+        let response_line = ResponseLine::new(Version::Http11, Status::InternalServerError);
         self.send_response(&response_line, &[], None).await
     }
 
