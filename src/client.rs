@@ -77,10 +77,14 @@ impl Client {
     }
 
     pub async fn run(&mut self) -> Result<(), ServerError> {
-        let request = Request::from(&mut self.reader).await?;
-        match self.serve(&request).await {
-            Ok(_) | Err(ServerError::Disconnected) => Ok(()),
-            _ => self.server_error().await,
+        loop {
+            let request = Request::from(&mut self.reader).await?;
+            if !matches!(
+                self.serve(&request).await,
+                Ok(_) | Err(ServerError::Disconnected)
+            ) {
+                self.server_error().await?;
+            }
         }
     }
 
