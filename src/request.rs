@@ -130,7 +130,6 @@ impl Request {
             None => None,
         };
 
-        // TODO No body for now
         Ok(Self {
             request_line,
             headers,
