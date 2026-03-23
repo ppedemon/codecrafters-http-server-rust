@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
+use crate::encoding::Encoding;
 use crate::error::ServerError;
 use crate::headers::Header;
 
@@ -151,5 +152,17 @@ impl Request {
 
     pub fn body(&self) -> Option<&[u8]> {
         self.body.as_deref()
+    }
+
+    pub fn accepted_encodings(&self) -> Vec<Encoding> {
+        self.header(&Header::AcceptEncoding)
+            .map_or(vec![], |v| match v.as_slice() {
+                [enc] => enc
+                    .split(",")
+                    .map(|s| Encoding::from(s.trim_ascii()))
+                    .flatten()
+                    .collect(),
+                _ => vec![],
+            })
     }
 }

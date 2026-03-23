@@ -7,6 +7,7 @@ use tokio::net::TcpListener;
 use crate::{client::Client, error::ServerError};
 
 mod client;
+mod encoding;
 mod error;
 mod fileops;
 mod headers;

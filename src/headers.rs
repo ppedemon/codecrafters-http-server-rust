@@ -1,10 +1,12 @@
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Header {
     Host,
     UserAgent,
     Accept,
+    AcceptEncoding,
     ContentLength,
     ContentType,
+    ContentEncoding,
 }
 
 impl Header {
@@ -13,8 +15,10 @@ impl Header {
             Self::Host => b"Host",
             Self::UserAgent => b"User-Agent",
             Self::Accept => b"Accept",
+            Self::AcceptEncoding => b"Accept-Encoding",
             Self::ContentLength => b"Content-Length",
             Self::ContentType => b"Content-Type",
+            Self::ContentEncoding => b"Content-Encoding",
         }
     }
 
@@ -26,10 +30,14 @@ impl Header {
             Some(Self::UserAgent)
         } else if h.eq_ignore_ascii_case(b"accept") {
             Some(Self::Accept)
+        } else if h.eq_ignore_ascii_case(b"accept-encoding") {
+            Some(Self::AcceptEncoding)
         } else if h.eq_ignore_ascii_case(b"content-length") {
             Some(Self::ContentLength)
         } else if h.eq_ignore_ascii_case(b"content-type") {
             Some(Self::ContentType)
+        } else if h.eq_ignore_ascii_case(b"content-encoding") {
+            Some(Self::ContentEncoding)
         } else {
             None
         }

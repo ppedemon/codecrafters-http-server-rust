@@ -3,6 +3,7 @@ use tokio::io::{self, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
+use crate::encoding::Encoding;
 use crate::error::ServerError;
 use crate::fileops;
 use crate::headers::Header;
@@ -84,7 +85,7 @@ impl Client {
             self.ok().await
         } else if target.starts_with("/echo/") {
             let msg = &target[6..];
-            self.echo(msg).await
+            self.echo(msg, request).await
         } else if target == "/user-agent" {
             self.user_agent(request).await
         } else if target.starts_with("/files/") {
@@ -95,8 +96,15 @@ impl Client {
         }
     }
 
-    async fn echo(&mut self, msg: &str) -> Result<(), ServerError> {
-        self.ok_with_body(&[Self::TEXT_PLAIN], msg.as_bytes()).await
+    async fn echo(&mut self, msg: &str, request: &Request) -> Result<(), ServerError> {
+        let headers = [Self::TEXT_PLAIN];
+        match request.accepted_encodings().as_slice() {
+            [encoding, ..] => {
+                self.ok_with_encoded_body(encoding, &headers, msg.as_bytes())
+                    .await
+            }
+            [] => self.ok_with_body(&headers, msg.as_bytes()).await,
+        }
     }
 
     async fn user_agent(&mut self, request: &Request) -> Result<(), ServerError> {
@@ -118,16 +126,14 @@ impl Client {
             Method::Get => match fileops::read_file(&root_dir, file_name).await {
                 Ok(buf) => self.ok_with_body(&[Self::OCTET_STREAM], &buf).await,
                 Err(_) => self.not_found().await,
-            }
-            Method::Post => {
-                match request.body() {
-                    Some(contents) => {
-                        fileops::write_file(root_dir, file_name, contents).await?;
-                        self.created().await
-                    }
-                    None => Err(ServerError::InvalidRequest),
+            },
+            Method::Post => match request.body() {
+                Some(contents) => {
+                    fileops::write_file(root_dir, file_name, contents).await?;
+                    self.created().await
                 }
-            }
+                None => Err(ServerError::InvalidRequest),
+            },
         }
     }
 
@@ -143,6 +149,20 @@ impl Client {
     ) -> Result<(), ServerError> {
         let response_line = ResponseLine::new(Version::Http11, Status::Ok);
         self.send_response(&response_line, headers, Some(body))
+            .await
+    }
+
+    async fn ok_with_encoded_body(
+        &mut self,
+        encoding: &Encoding,
+        headers: &[(Header, &str)],
+        body: &[u8],
+    ) -> Result<(), ServerError> {
+        let mut ext_headers = Vec::with_capacity(headers.len() + 1);
+        ext_headers.extend_from_slice(headers);
+        ext_headers.push((Header::ContentEncoding, encoding.as_str()));
+        let response_line = ResponseLine::new(Version::Http11, Status::Ok);
+        self.send_response(&response_line, &ext_headers, Some(body))
             .await
     }
 
