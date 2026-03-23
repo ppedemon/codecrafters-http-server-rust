@@ -7,6 +7,7 @@ pub enum Header {
     ContentLength,
     ContentType,
     ContentEncoding,
+    Connection,
 }
 
 impl Header {
@@ -19,6 +20,7 @@ impl Header {
             Self::ContentLength => b"Content-Length",
             Self::ContentType => b"Content-Type",
             Self::ContentEncoding => b"Content-Encoding",
+            Self::Connection => b"Connection",
         }
     }
 
@@ -38,6 +40,8 @@ impl Header {
             Some(Self::ContentType)
         } else if h.eq_ignore_ascii_case(b"content-encoding") {
             Some(Self::ContentEncoding)
+        } else if h.eq_ignore_ascii_case(b"connection") {
+            Some(Self::Connection)
         } else {
             None
         }

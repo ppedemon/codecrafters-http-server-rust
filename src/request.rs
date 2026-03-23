@@ -165,4 +165,9 @@ impl Request {
                 _ => vec![],
             })
     }
+
+    pub fn should_close(&self) -> bool {
+        self.header(&Header::Connection)
+            .map_or(false, |v| v.iter().any(|s| s.eq_ignore_ascii_case("close")))
+    }
 }

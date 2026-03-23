@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 use tokio::io::{self, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpStream;
@@ -66,6 +67,7 @@ pub struct Client {
 impl Client {
     const TEXT_PLAIN: (Header, &str) = (Header::ContentType, "text/plain");
     const OCTET_STREAM: (Header, &str) = (Header::ContentType, "application/octet-stream");
+    const CONN_CLOSE: (Header, &str) = (Header::Connection, "close");
 
     pub fn new(socket: TcpStream, root_dir: Arc<Option<String>>) -> Self {
         let (reader, writer) = socket.into_split();
@@ -85,13 +87,17 @@ impl Client {
             ) {
                 self.server_error().await?;
             }
+            if request.should_close() {
+                break;
+            }
         }
+        Ok(())
     }
 
     async fn serve(&mut self, request: &Request) -> Result<(), ServerError> {
         let target = request.target();
         if target == "/" {
-            self.ok().await
+            self.ok(request).await
         } else if target.starts_with("/echo/") {
             let msg = &target[6..];
             self.echo(msg, request).await
@@ -106,13 +112,13 @@ impl Client {
     }
 
     async fn echo(&mut self, msg: &str, request: &Request) -> Result<(), ServerError> {
-        let headers = [Self::TEXT_PLAIN];
+        let headers = &[Self::TEXT_PLAIN];
         match request.accepted_encodings().as_slice() {
             [encoding, ..] => {
-                self.ok_with_encoded_body(encoding, &headers, msg.as_bytes())
+                self.ok_with_encoded_body(request, encoding, headers, msg.as_bytes())
                     .await
             }
-            [] => self.ok_with_body(&headers, msg.as_bytes()).await,
+            [] => self.ok_with_body(request, headers, msg.as_bytes()).await,
         }
     }
 
@@ -124,7 +130,8 @@ impl Client {
                 _ => None,
             })
             .ok_or(ServerError::InvalidRequest)?;
-        self.ok_with_body(&[Self::TEXT_PLAIN], user_agent).await
+        self.ok_with_body(request, &[Self::TEXT_PLAIN], user_agent)
+            .await
     }
 
     async fn file(&mut self, file_name: &str, request: &Request) -> Result<(), ServerError> {
@@ -133,7 +140,10 @@ impl Client {
         };
         match request.method() {
             Method::Get => match fileops::read_file(&root_dir, file_name).await {
-                Ok(buf) => self.ok_with_body(&[Self::OCTET_STREAM], &buf).await,
+                Ok(buf) => {
+                    self.ok_with_body(request, &[Self::OCTET_STREAM], &buf)
+                        .await
+                }
                 Err(_) => self.not_found().await,
             },
             Method::Post => match request.body() {
@@ -146,16 +156,23 @@ impl Client {
         }
     }
 
-    async fn ok(&mut self) -> Result<(), ServerError> {
+    async fn ok(&mut self, request: &Request) -> Result<(), ServerError> {
         let response_line = ResponseLine::new(Version::Http11, Status::Ok);
-        self.send_response(&response_line, &[], None).await
+        let headers = if request.should_close() {
+            [Self::CONN_CLOSE].as_slice()
+        } else {
+            [].as_slice()
+        };
+        self.send_response(&response_line, headers, None).await
     }
 
     async fn ok_with_body(
         &mut self,
+        request: &Request,
         headers: &[(Header, &str)],
         body: &[u8],
     ) -> Result<(), ServerError> {
+        let headers = &Self::augment_headers(headers, request);
         let response_line = ResponseLine::new(Version::Http11, Status::Ok);
         self.send_response(&response_line, headers, Some(body))
             .await
@@ -163,6 +180,7 @@ impl Client {
 
     async fn ok_with_encoded_body(
         &mut self,
+        request: &Request,
         encoding: &Encoding,
         headers: &[(Header, &str)],
         body: &[u8],
@@ -170,6 +188,7 @@ impl Client {
         let mut ext_headers = Vec::with_capacity(headers.len() + 1);
         ext_headers.extend_from_slice(headers);
         ext_headers.push((Header::ContentEncoding, encoding.as_str()));
+        let ext_headers = Self::augment_headers(&ext_headers, &request);
         let response_line = ResponseLine::new(Version::Http11, Status::Ok);
         let enc_body = encoding.encode(body).await?;
         self.send_response(&response_line, &ext_headers, Some(&enc_body))
@@ -224,5 +243,19 @@ impl Client {
         self.writer.write_all(value.trim().as_bytes()).await?;
         self.writer.write_all(b"\r\n").await?;
         Ok(())
+    }
+
+    fn augment_headers<'a>(
+        headers: &'a [(Header, &str)],
+        request: &Request,
+    ) -> Cow<'a, [(Header, &'a str)]> {
+        if request.should_close() {
+            let mut ext_headers = Vec::with_capacity(headers.len() + 1);
+            ext_headers.extend_from_slice(headers);
+            ext_headers.push(Self::CONN_CLOSE);
+            Cow::Owned(ext_headers)
+        } else {
+            Cow::Borrowed(headers)
+        }
     }
 }
