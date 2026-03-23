@@ -6,25 +6,28 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use crate::error::ServerError;
 use crate::fileops;
 use crate::headers::Header;
-use crate::request::{Request, Version};
+use crate::request::{Method, Request, Version};
 
 enum Status {
     Ok,
+    Created,
     NotFound,
 }
 
 impl Status {
     pub fn as_bytes(&self) -> &[u8] {
         match self {
-            Status::Ok => "200".as_bytes(),
-            Status::NotFound => "404".as_bytes(),
+            Self::Ok => b"200",
+            Self::Created => b"201",
+            Self::NotFound => b"404",
         }
     }
 
     pub fn reason(&self) -> &[u8] {
         match self {
-            Status::Ok => "OK".as_bytes(),
-            Status::NotFound => "Not Found".as_bytes(),
+            Self::Ok => b"OK",
+            Self::Created => b"Created",
+            Self::NotFound => b"Not Found",
         }
     }
 }
@@ -57,6 +60,9 @@ pub struct Client {
 }
 
 impl Client {
+    const TEXT_PLAIN: (Header, &str) = (Header::ContentType, "text/plain");
+    const OCTET_STREAM: (Header, &str) = (Header::ContentType, "application/octet-stream");
+
     pub fn new(socket: TcpStream, root_dir: Arc<Option<String>>) -> Self {
         let (reader, writer) = socket.into_split();
         Self {
@@ -73,58 +79,81 @@ impl Client {
     }
 
     async fn serve(&mut self, request: &Request) -> Result<(), ServerError> {
-        let target = request.request_line.target.as_str();
+        let target = request.target();
         if target == "/" {
-            let response_line = ResponseLine::new(Version::Http11, Status::Ok);
-            self.send_response(&response_line, &[], None).await
+            self.ok().await
         } else if target.starts_with("/echo/") {
             let msg = &target[6..];
-            let response_line = ResponseLine::new(Version::Http11, Status::Ok);
-            self.send_response(
-                &response_line,
-                &[(Header::ContentType, "text/plain")],
-                Some(msg.as_bytes()),
-            )
-            .await
+            self.echo(msg).await
         } else if target == "/user-agent" {
-            let user_agent = request
-                .get_header(&Header::UserAgent)
-                .and_then(|v| match v.as_slice() {
-                    [user_agent] => Some(user_agent.as_bytes()),
-                    _ => None,
-                })
-                .ok_or(ServerError::InvalidRequest)?;
-            let response_line = ResponseLine::new(Version::Http11, Status::Ok);
-            self.send_response(
-                &response_line,
-                &[(Header::ContentType, "text/plain")],
-                Some(user_agent),
-            )
-            .await
+            self.user_agent(request).await
         } else if target.starts_with("/files/") {
             let file_name = &target[7..];
-            let Some(root_dir) = &*self.root_dir else {
-                return Err(ServerError::NoRootFolder);
-            };
-            match fileops::read_file(&root_dir, file_name).await {
-                Ok(buf) => {
-                    let response_line = ResponseLine::new(Version::Http11, Status::Ok);
-                    self.send_response(
-                        &response_line,
-                        &[(Header::ContentType, "application/octet-stream")],
-                        Some(&buf),
-                    )
-                    .await
-                }
-                Err(_) => {
-                    let response_line = ResponseLine::new(Version::Http11, Status::NotFound);
-                    self.send_response(&response_line, &[], None).await
+            self.file(file_name, request).await
+        } else {
+            self.not_found().await
+        }
+    }
+
+    async fn echo(&mut self, msg: &str) -> Result<(), ServerError> {
+        self.ok_with_body(&[Self::TEXT_PLAIN], msg.as_bytes()).await
+    }
+
+    async fn user_agent(&mut self, request: &Request) -> Result<(), ServerError> {
+        let user_agent = request
+            .header(&Header::UserAgent)
+            .and_then(|v| match v.as_slice() {
+                [user_agent] => Some(user_agent.as_bytes()),
+                _ => None,
+            })
+            .ok_or(ServerError::InvalidRequest)?;
+        self.ok_with_body(&[Self::TEXT_PLAIN], user_agent).await
+    }
+
+    async fn file(&mut self, file_name: &str, request: &Request) -> Result<(), ServerError> {
+        let Some(root_dir) = &*self.root_dir else {
+            return Err(ServerError::NoRootFolder);
+        };
+        match request.method() {
+            Method::Get => match fileops::read_file(&root_dir, file_name).await {
+                Ok(buf) => self.ok_with_body(&[Self::OCTET_STREAM], &buf).await,
+                Err(_) => self.not_found().await,
+            }
+            Method::Post => {
+                match request.body() {
+                    Some(contents) => {
+                        fileops::write_file(root_dir, file_name, contents).await?;
+                        self.created().await
+                    }
+                    None => Err(ServerError::InvalidRequest),
                 }
             }
-        } else {
-            let response_line = ResponseLine::new(Version::Http11, Status::NotFound);
-            self.send_response(&response_line, &[], None).await
         }
+    }
+
+    async fn ok(&mut self) -> Result<(), ServerError> {
+        let response_line = ResponseLine::new(Version::Http11, Status::Ok);
+        self.send_response(&response_line, &[], None).await
+    }
+
+    async fn ok_with_body(
+        &mut self,
+        headers: &[(Header, &str)],
+        body: &[u8],
+    ) -> Result<(), ServerError> {
+        let response_line = ResponseLine::new(Version::Http11, Status::Ok);
+        self.send_response(&response_line, headers, Some(body))
+            .await
+    }
+
+    async fn created(&mut self) -> Result<(), ServerError> {
+        let response_line = ResponseLine::new(Version::Http11, Status::Created);
+        self.send_response(&response_line, &[], None).await
+    }
+
+    async fn not_found(&mut self) -> Result<(), ServerError> {
+        let response_line = ResponseLine::new(Version::Http11, Status::NotFound);
+        self.send_response(&response_line, &[], None).await
     }
 
     async fn send_response(

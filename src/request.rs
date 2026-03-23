@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
-use tokio::io::AsyncRead;
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::error::ServerError;
 use crate::headers::Header;
@@ -92,11 +92,20 @@ impl Headers {
 
         Ok(Self(headers))
     }
+
+    fn content_length(&self) -> Option<usize> {
+        self.0
+            .get(&Header::ContentLength)
+            .and_then(|v| match v.as_slice() {
+                [value] => value.parse::<usize>().ok(),
+                _ => None,
+            })
+    }
 }
 
 pub struct Request {
-    pub request_line: RequestLine,
-    pub headers: Headers,
+    request_line: RequestLine,
+    headers: Headers,
     body: Option<Vec<u8>>,
 }
 
@@ -111,15 +120,36 @@ impl Request {
         let request_line = RequestLine::from(buf.trim_end_matches("\r\n"))?;
         let headers = Headers::from(r).await?;
 
+        let body = match headers.content_length() {
+            Some(len) => {
+                let mut body = vec![0u8; len];
+                r.read_exact(&mut body).await?;
+                Some(body)
+            }
+            None => None,
+        };
+
         // TODO No body for now
         Ok(Self {
             request_line,
             headers,
-            body: None,
+            body,
         })
     }
 
-    pub fn get_header(&self, h: &Header) -> Option<&Vec<String>> {
-      self.headers.0.get(h)
+    pub fn method(&self) -> &Method {
+        &self.request_line.method
+    }
+
+    pub fn target(&self) -> &str {
+        &self.request_line.target
+    }
+
+    pub fn header(&self, h: &Header) -> Option<&Vec<String>> {
+        self.headers.0.get(h)
+    }
+
+    pub fn body(&self) -> Option<&[u8]> {
+        self.body.as_deref()
     }
 }
